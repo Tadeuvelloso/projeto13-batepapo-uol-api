@@ -28,13 +28,15 @@ let db;
 let messages;
 let participants;
 let now = dayjs();
+const time = Date.now();
+const horario = now.format("HH:mm:ss");
 
 try {
     await mongoClient.connect();
     db = mongoClient.db("uol");
     messages = db.collection("messages");
     participants = db.collection("participants");
-} catch (err){
+} catch (err) {
     console.log(err);
 };
 
@@ -44,143 +46,221 @@ app.post("/participants", async (req, res) => {
 
     const validation = participantsSchema.validate(participante);
 
-    if(validation.error){
+    if (validation.error) {
         console.log(validation.error.details);
         res.status(422).send("Me envie um nome!");
         return
     }
 
-    const participantCadastrado = await participants.findOne({name: participante.name});
+    const participantCadastrado = await participants.findOne({ name: participante.name });
 
-    if(participantCadastrado){
+    if (participantCadastrado) {
         res.status(409).send("Usuário ja cadastrado!");
         return
     }
 
-    try{
-        await participants.insertOne({name: participante.name, lastStatus: Date.now()});
+    try {
+        await participants.insertOne({ name: participante.name, lastStatus: Date.now() });
         res.sendStatus(201);
-    } catch (err){
+    } catch (err) {
         res.sendStatus(500);
     }
 
 });
 
-app.get("/participants", async(req, res) => {
-    try{
-        const Allparticipants = await participants.find().toArray();
-        res.status(201).send(Allparticipants);
-    } catch (err){
+app.get("/participants", async (req, res) => {
+    try {
+        const allparticipants = await participants.find().toArray();
+        res.status(201).send(allparticipants);
+    } catch (err) {
         res.sendStatus(500);
     };
 });
 
-app.post("/messages", async(req, res) => {
+app.post("/messages", async (req, res) => {
     const message = req.body;
-    const {user} = req.headers;
-    const time = now.format("HH:mm:ss");
-    
+    const { user } = req.headers;
+
 
     const validation = messageSchema.validate(message);
-    if(validation.error){
+    if (validation.error) {
         res.sendStatus(422);
         return
     }
 
-    const usurarioOnline = await participants.findOne({name: user})
+    const usurarioOnline = await participants.findOne({ name: user })
 
-    if(!usurarioOnline){
+    if (!usurarioOnline) {
         res.sendStatus(404);
         return
     }
 
-    try{
+    try {
         await messages.insertOne(
-            {from: user,
-            to: message.to,
-            text: message.text,
-            type: message.type,
-            time});
+            {
+                from: user,
+                to: message.to,
+                text: message.text,
+                type: message.type,
+                time: horario
+            });
         res.sendStatus(201);
+        return
     } catch (err) {
         res.sendStatus(500);
+        return
     }
 });
 
-app.get("/messages", async(req, res) => {
+app.get("/messages", async (req, res) => {
+    const { user } = req.headers;
     const { limit } = req.query;
-    
-    try{
+
+    const verificadorUser = await participants.findOne({ name: user });
+
+    if (!verificadorUser) {
+        res.status(404).send("Me envie um usuário valido pelo headers!");
+    }
+
+    try {
         const allMessages = await messages.find().toArray();
-        if(limit){
-            const lastMessages = allMessages.slice(-(limit))
+
+        const filtredMessages = allMessages.filter((m) => m.to === user || m.to === "Todos");
+
+        if (limit) {
+            const lastMessages = filtredMessages.slice(-(limit))
             res.status(201).send(lastMessages);
             return
         }
-        res.status(201).send(allMessages);
+        res.status(201).send(filtredMessages);
+        return
     } catch (err) {
         res.sendStatus(500);
-    }; 
-    
+        return
+    };
+
 });
 
 app.post("/status", async (req, res) => {
-    const {user} = req.headers;
-  
+    const { user } = req.headers;
 
-    const verificaParticipante = participants.findOne({name: user});
 
-    if(!verificaParticipante){
+    console.log(time)
+
+    const verificaParticipante = participants.findOne({ name: user });
+
+    if (!verificaParticipante) {
         res.sendStatus(404);
+        return
     }
 
-    try{
-        const resp = await participants.updateOne({name: user}, {$set: {name: user, lastStatus: Date.now()}});
+    try {
+        const resp = await participants.updateOne({ name: user }, { $set: { name: user, lastStatus: Date.now() } });
         res.sendStatus(200)
         console.log("atualizado")
         return
     } catch (err) {
         console.log(err)
         res.sendStatus(500)
+        return
+    }
+});
+
+setInterval(async () => {
+
+    const allParticipants = await participants.find().toArray();
+
+    const usersExpirado = allParticipants.filter((p) => Number(time) - Number(p.lastStatus) > 10)
+
+
+    for (let i = 0; i < usersExpirado.length; i++) {
+
+        const participanteExpirado = usersExpirado[i];
+
+        try {
+
+            await messages.insertOne({ from: participanteExpirado.name, to: 'Todos', text: 'sai da sala...', type: 'status', time: horario });
+            await participants.deleteOne({ name: participanteExpirado.name });
+
+        } catch (err) {
+            console.log(err)
+        }
+    }
+}, 15000)
+
+app.delete("/messages/:id", async (req, res) => {
+    const { user } = req.headers;
+    const { id } = req.params;
+
+    const verificaParticipante = await participants.findOne({ name: user });
+    const verificaMessage = await messages.findOne({ _id: ObjectId(id) });
+
+    if (!verificaMessage) {
+        res.sendStatus(404);
+        return
     }
 
-    //de 15 em 15 segundos percorrer a array vendo o laststatus de (now - laststatus) < 10 se for menor que 10 tira ele da lista de participants e manda uma mensagem que sair da sala
+    if (!verificaParticipante) {
+        res.sendStatus(404);
+        return
+    }
 
+    if (verificaMessage.name !== user) {
+        res.sendStatus(401);
+        return
+    }
+
+    try {
+        await db.messages.deleteOne({ _id: ObjectId(id) });
+        res.send("Mensagem apagada com sucesso!")
+        return
+    } catch (err) {
+        res.sendStatus(404)
+        return
+    }
 })
 
+app.put("/messages/:id", async (req, res) => {
+    const { user } = req.headers
+    const { id } = req.params
+    const message = req.body
 
+    const messageFinded = await messages.findOne({ _id: ObjectId(id) });
 
-// app.delete("/messages/:id", async(req, res) => {
-//     //precisamos receber o nome do user pra verificar se ele exste no banco de dados.
-//     const {id} = req.params;
+    if (!messageFinded) {
+        res.status(404).send("Mensagem não encontrada!");
+        return
+    }
 
-//     try {
-//         const resp = await db.messages.deleteOne({_id: new ObjectId(id)});
-//         res.send("Mensagem apagada com sucesso!")
-//     } catch (err) {
-//         res.sendStatus(404)
-//     }
-// })
+    const validation = messageSchema.validate(message);
+    if (validation.error) {
+        res.sendStatus(422);
+        return
+    }
 
-// app.put("/messages/:id", async (req, res) => {
+    if(user !== messageFinded.from){
+        res.sendStatus(401);
+        return
+    }
 
-//     const {id} = req.params
-//     const message = req.body
+    try {
+        await messages.updateOne({ _id: new ObjectId(id) }, {
+            $set: {
+                from: user,
+                to: message.to,
+                text: message.text,
+                type: message.type,
+                time: horario
+            }
+        });
+        res.status(201).send("Mensagem atualizada!")
+        return
 
-//     try {
-//         const mesageFinded = await db.mensagem.findOne({_id: new ObjectId(id)});
-//         if(!mesageFinded){
-//             res.status(400).send("Mensagem não encontrada!");
-//             return
-//         }
-//         await mensagem.updateOne({_id: new ObjectId(id)}, {$set: message});
-//         res.send("Mensagem atualizada!")
+    } catch (err) {
+        console.log(err)
+        res.sendStatus(500);
+    }
 
-//     } catch (err) {
-//         console.log(err)
-//         res.sendStatus(500);
-//     }
+});
 
-// });
-
-app.listen(5000, () => {console.log("Server running in port: 5000")})
+app.listen(5000, () => { console.log("Server running in port: 5000") })
